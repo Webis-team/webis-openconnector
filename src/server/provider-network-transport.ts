@@ -96,10 +96,14 @@ async function fetchCandidate(
 
 function candidateAgent(candidate: ResolvedAddress): Agent {
   return new Agent({
-    connectTimeout: candidateConnectTimeoutMs,
     connect: {
-      lookup(_hostname, _options, callback) {
-        callback(null, candidate.address, candidate.family);
+      timeout: candidateConnectTimeoutMs,
+      lookup(_hostname, options, callback) {
+        if (options.all) {
+          callback(null, [{ address: candidate.address, family: candidate.family }] as never);
+        } else {
+          callback(null, candidate.address, candidate.family);
+        }
       },
     },
   });

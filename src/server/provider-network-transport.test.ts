@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
 import { createProviderNetworkTransport } from "./provider-network-transport.ts";
 
 const target = {
@@ -17,6 +18,75 @@ function agent() {
 }
 
 describe("provider network transport", () => {
+  it("pins a real Undici request when Node asks the custom lookup for all addresses", async () => {
+    const server = createServer((_request, response) => {
+      response.end("pinned");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP server address");
+      const pinnedTarget = {
+        url: new URL(`http://provider.test:${address.port}/data`),
+        addresses: [{ address: "127.0.0.1", family: 4 }],
+      };
+      const transport = createProviderNetworkTransport();
+
+      await expect((await transport(pinnedTarget, pinnedTarget.url)).text()).resolves.toBe("pinned");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        }),
+      );
+    }
+  });
+
+  it("falls through a connect timeout to a real pinned Undici request", async () => {
+    const server = createServer((_request, response) => response.end("fallback"));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP server address");
+      const fallbackTarget = {
+        url: new URL(`http://provider.test:${address.port}/data`),
+        addresses: [
+          { address: "192.0.2.1", family: 4 },
+          { address: "127.0.0.1", family: 4 },
+        ],
+      };
+      const pinnedTransport = createProviderNetworkTransport();
+      const outerAgent = agent();
+      const attempt = vi.fn(async (_url, input, init, candidate) => {
+        if (candidate.address === "192.0.2.1") {
+          throw Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" });
+        }
+        return {
+          response: await pinnedTransport({ ...fallbackTarget, addresses: [candidate] }, input, init),
+          agent: outerAgent,
+        };
+      });
+      const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+
+      await expect((await transport(fallbackTarget, fallbackTarget.url)).text()).resolves.toBe("fallback");
+      expect(attempt).toHaveBeenCalledTimes(2);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        }),
+      );
+    }
+  });
+
   it("tries the next SSRF-approved candidate after an exact connect timeout", async () => {
     const successfulAgent = agent();
     const attempt = vi
