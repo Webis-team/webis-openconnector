@@ -70,6 +70,51 @@ describe("resolveGuardedEgressTarget", () => {
   });
 });
 
+describe("createGuardedFetch resolved transport", () => {
+  it("passes each redirect hop only after its complete address set is validated", async () => {
+    const responses = [redirectTo("https://cdn.example.net/file"), new Response("ok")];
+    const targets: Array<{ hostname: string; addresses: string[] }> = [];
+    const guarded = createGuardedFetch({
+      lookup: lookupTable({
+        "api.example.com": [{ address: "93.184.216.34", family: 4 }],
+        "cdn.example.net": [
+          { address: "93.184.216.35", family: 4 },
+          { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 },
+        ],
+      }),
+      resolvedTransport: async (target) => {
+        targets.push({ hostname: target.url.hostname, addresses: target.addresses.map((item) => item.address) });
+        return responses.shift()!;
+      },
+    });
+
+    await expect((await guarded("https://api.example.com/start")).text()).resolves.toBe("ok");
+    expect(targets).toEqual([
+      { hostname: "api.example.com", addresses: ["93.184.216.34"] },
+      {
+        hostname: "cdn.example.net",
+        addresses: ["93.184.216.35", "2606:2800:220:1:248:1893:25c8:1946"],
+      },
+    ]);
+  });
+
+  it("never routes side-effecting methods through the fallback transport", async () => {
+    const { transport, calls } = createTransport([new Response("created", { status: 201 })]);
+    const resolvedTransport = vi.fn();
+    const guarded = createGuardedFetch({
+      fetch: transport,
+      lookup: lookupTable({ "api.example.com": [{ address: "93.184.216.34", family: 4 }] }),
+      resolvedTransport,
+    });
+
+    const response = await guarded("https://api.example.com/items", { method: "POST", body: "payload" });
+
+    expect(response.status).toBe(201);
+    expect(resolvedTransport).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("createGuardedFetch redirects", () => {
   it("follows public redirects with manual hops and returns the final response", async () => {
     const { transport, calls } = createTransport([

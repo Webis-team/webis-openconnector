@@ -1,3 +1,4 @@
+import type { GuardedFetchResolvedTransport } from "../core/guarded-fetch.ts";
 import type {
   ActionExecutor,
   ExecutionContext,
@@ -37,6 +38,13 @@ export interface ProviderFetchOptions {
   additionalSensitiveHeaders?: readonly string[];
 }
 
+let providerResolvedTransport: GuardedFetchResolvedTransport | undefined;
+
+/** Configure the Node runtime transport without pulling Node-only dependencies into provider bundles. */
+export function setProviderResolvedTransport(transport: GuardedFetchResolvedTransport | undefined): void {
+  providerResolvedTransport = transport;
+}
+
 /**
  * Create the SSRF-guarded fetch used for all provider egress: the request URL,
  * every redirect hop, and (when DNS is available) every resolved address are
@@ -44,8 +52,11 @@ export interface ProviderFetchOptions {
  * cannot redirect or resolve into loopback/link-local/metadata/private targets.
  */
 export function createProviderFetch(options: ProviderFetchOptions = {}): ProviderFetch {
+  const baseFetch = options.fetch;
   return createGuardedFetch({
-    fetch: options.fetch,
+    fetch: baseFetch,
+    resolvedTransport: (target, input, init) =>
+      providerResolvedTransport?.(target, input, init) ?? (baseFetch ?? globalThis.fetch)(input, init),
     allowPrivateNetwork: options.allowPrivateNetwork,
     skipDnsValidation: options.skipDnsValidation,
     additionalSensitiveHeaders: options.additionalSensitiveHeaders,

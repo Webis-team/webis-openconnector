@@ -14,6 +14,7 @@ import {
   setPrivateNetworkAccessAllowed,
 } from "../core/request.ts";
 import { ProviderLoader } from "../providers/provider-loader.ts";
+import { setProviderResolvedTransport } from "../providers/provider-runtime.ts";
 import { executorModules } from "../providers/registry.generated.ts";
 import { createRuntimeJwtVerifier } from "./api/runtime-jwt.ts";
 import { registerStaticRoutes } from "./api/static-routes.ts";
@@ -22,6 +23,7 @@ import { cleanupStagedTransitFiles, createNodeTransitFileUpload } from "./files/
 import { S3TransitFileService } from "./files/s3-transit-files.ts";
 import { TransitFileService } from "./files/transit-files.ts";
 import { logger } from "./logger.ts";
+import { createProviderNetworkTransport } from "./provider-network-transport.ts";
 import { createSecretCodec } from "./secrets/secret-codec.ts";
 import { createNodeRuntimeDatabase } from "./storage/node-runtime-database.ts";
 import { DEFAULT_RUN_LIMIT } from "./storage/runtime-store.ts";
@@ -45,6 +47,8 @@ try {
 }
 
 async function main(): Promise<void> {
+  setProviderResolvedTransport(createProviderNetworkTransport(logger));
+  logger.info({ candidateConnectTimeoutMs: 3_000 }, "provider network candidate fallback configured");
   setPrivateNetworkAccessAllowed(parsePrivateNetworkAccessFlag(process.env.OOMOL_CONNECT_ALLOW_PRIVATE_NETWORK));
   setEgressTrustedHosts(parseEgressTrustedHosts(process.env.OOMOL_CONNECT_EGRESS_TRUSTED_HOSTS));
 

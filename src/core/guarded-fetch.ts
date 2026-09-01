@@ -15,12 +15,20 @@ export interface ResolvedAddress {
  */
 export type GuardedFetchDnsLookup = (hostname: string) => Promise<ResolvedAddress[]>;
 
+export type GuardedFetchResolvedTransport = (
+  target: GuardedEgressTarget,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
 export interface GuardedFetchOptions {
   /**
    * Base transport issuing the actual requests. Defaults to the global fetch,
    * resolved per call so test stubs installed later still apply.
    */
   fetch?: typeof fetch;
+  /** Node-only transport that can pin a request to one of the addresses already approved by the SSRF guard. */
+  resolvedTransport?: GuardedFetchResolvedTransport;
   /**
    * Allow RFC 1918, shared-address-space, and private targets for this fetch
    * while retaining reserved/loopback/link-local/metadata guards. A function is
@@ -180,10 +188,17 @@ export function createGuardedFetch(options: GuardedFetchOptions = {}): typeof fe
   const guardedFetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const transport = baseFetch ?? globalThis.fetch;
     const fetchTransport = async (
+      target: GuardedEgressTarget,
       transportInput: RequestInfo | URL,
       transportInit?: RequestInit,
     ): Promise<Response> => {
       try {
+        const method = (
+          transportInit?.method ?? (transportInput instanceof Request ? transportInput.method : "GET")
+        ).toUpperCase();
+        if (options.resolvedTransport && (method === "GET" || method === "HEAD")) {
+          return await options.resolvedTransport(target, transportInput, transportInit);
+        }
         return await transport(transportInput, transportInit);
       } catch (error) {
         throw options.mapTransportError?.(error) ?? error;
@@ -198,15 +213,16 @@ export function createGuardedFetch(options: GuardedFetchOptions = {}): typeof fe
       : options.lookup === undefined
         ? await resolveDefaultLookup()
         : options.lookup;
-    const guardHop = (value: string, fieldName: string): Promise<URL> =>
-      assertGuardedEgressUrl(value, { fieldName, createError, allowPrivateNetwork, lookup });
+    const guardHop = (value: string, fieldName: string): Promise<GuardedEgressTarget> =>
+      resolveGuardedEgressTarget(value, { fieldName, createError, allowPrivateNetwork, lookup });
 
     const request = input instanceof Request ? input : undefined;
-    let url = await guardHop(request?.url ?? (input instanceof URL ? input.href : String(input)), "request URL");
+    let target = await guardHop(request?.url ?? (input instanceof URL ? input.href : String(input)), "request URL");
+    let url = target.url;
 
     const redirectMode = init?.redirect ?? request?.redirect ?? "follow";
     if (redirectMode !== "follow") {
-      return fetchTransport(input, init);
+      return fetchTransport(target, input, init);
     }
 
     let method = (init?.method ?? request?.method ?? "GET").toUpperCase();
@@ -217,9 +233,9 @@ export function createGuardedFetch(options: GuardedFetchOptions = {}): typeof fe
       const response =
         redirects === 0
           ? request
-            ? await fetchTransport(new Request(request, { ...init, redirect: "manual" }))
-            : await fetchTransport(url.toString(), { ...init, redirect: "manual" })
-          : await fetchTransport(url.toString(), {
+            ? await fetchTransport(target, new Request(request, { ...init, redirect: "manual" }))
+            : await fetchTransport(target, url.toString(), { ...init, redirect: "manual" })
+          : await fetchTransport(target, url.toString(), {
               ...init,
               method,
               // Clone per hop: later hops mutate `headers`, and a transport that
@@ -262,14 +278,15 @@ export function createGuardedFetch(options: GuardedFetchOptions = {}): typeof fe
       } else if (body !== undefined && body !== null && !isReplayableBody(body)) {
         throw createError("redirect cannot be followed because the request body is not replayable");
       }
-      if (guardedNext.origin !== url.origin) {
+      if (guardedNext.url.origin !== url.origin) {
         for (const name of [...headers.keys()]) {
           if (crossOriginCredentialHeaders.has(name) || additionalSensitiveHeaders.has(name)) {
             headers.delete(name);
           }
         }
       }
-      url = guardedNext;
+      target = guardedNext;
+      url = guardedNext.url;
     }
   }) as typeof fetch;
 
