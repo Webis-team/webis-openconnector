@@ -4,6 +4,7 @@ import type { Logger } from "./logger.ts";
 import { Agent, fetch as undiciFetch } from "undici";
 
 const candidateConnectTimeoutMs = 3_000;
+const maxCandidates = 4;
 
 interface CandidateAttempt {
   response: Awaited<ReturnType<typeof undiciFetch>>;
@@ -25,8 +26,9 @@ export function createProviderNetworkTransport(
 ): GuardedFetchResolvedTransport {
   const attempt = options.attempt ?? fetchCandidate;
   return async (target, input, init) => {
+    const candidates = boundedCandidates(target.addresses);
     let lastConnectTimeout: unknown;
-    for (const [index, candidate] of target.addresses.entries()) {
+    for (const [index, candidate] of candidates.entries()) {
       try {
         const { response, agent } = await attempt(target.url, input, init, candidate);
         return closeAgentWithResponse(response, agent);
@@ -38,7 +40,7 @@ export function createProviderNetworkTransport(
         logger?.warn(
           {
             candidateAttempt: index + 1,
-            candidateCount: target.addresses.length,
+            candidateCount: candidates.length,
             errorCode: "UND_ERR_CONNECT_TIMEOUT",
           },
           "provider network candidate timed out",
@@ -47,6 +49,28 @@ export function createProviderNetworkTransport(
     }
     throw lastConnectTimeout ?? new TypeError("provider network request failed");
   };
+}
+
+/** Deduplicate DNS answers and alternate address families without reordering within a family. */
+function boundedCandidates(addresses: readonly ResolvedAddress[]): ResolvedAddress[] {
+  const unique = addresses.filter(
+    (candidate, index) =>
+      addresses.findIndex((item) => item.family === candidate.family && item.address === candidate.address) === index,
+  );
+  if (unique.length <= 1) {
+    return unique;
+  }
+  const firstFamily = unique[0]?.family;
+  const first = unique.filter((candidate) => candidate.family === firstFamily);
+  const other = unique.filter((candidate) => candidate.family !== firstFamily);
+  const interleaved: ResolvedAddress[] = [];
+  while (interleaved.length < maxCandidates && (first.length > 0 || other.length > 0)) {
+    const primary = first.shift();
+    if (primary) interleaved.push(primary);
+    const secondary = other.shift();
+    if (secondary && interleaved.length < maxCandidates) interleaved.push(secondary);
+  }
+  return interleaved;
 }
 
 async function fetchCandidate(
@@ -153,8 +177,8 @@ function isConnectTimeout(error: unknown, seen = new Set<unknown>()): boolean {
   if (record.code === "UND_ERR_CONNECT_TIMEOUT") {
     return true;
   }
-  if (isConnectTimeout(record.cause, seen)) {
-    return true;
+  if (Array.isArray(record.errors)) {
+    return record.errors.length > 0 && record.errors.every((item) => isConnectTimeout(item, seen));
   }
-  return Array.isArray(record.errors) && record.errors.some((item) => isConnectTimeout(item, seen));
+  return isConnectTimeout(record.cause, seen);
 }

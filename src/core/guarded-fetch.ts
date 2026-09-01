@@ -196,7 +196,7 @@ export function createGuardedFetch(options: GuardedFetchOptions = {}): typeof fe
         const method = (
           transportInit?.method ?? (transportInput instanceof Request ? transportInput.method : "GET")
         ).toUpperCase();
-        if (options.resolvedTransport && (method === "GET" || method === "HEAD")) {
+        if (options.resolvedTransport && target.addresses.length > 0 && (method === "GET" || method === "HEAD")) {
           return await options.resolvedTransport(target, transportInput, transportInit);
         }
         return await transport(transportInput, transportInit);
