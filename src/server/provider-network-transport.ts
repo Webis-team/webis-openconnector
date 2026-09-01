@@ -5,6 +5,12 @@ import { Agent, fetch as undiciFetch } from "undici";
 
 const candidateConnectTimeoutMs = 3_000;
 const maxCandidates = 4;
+const retryableConnectErrorCodes = new Set([
+  "EADDRNOTAVAIL",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
 
 interface CandidateAttempt {
   response: Awaited<ReturnType<typeof undiciFetch>>;
@@ -27,27 +33,28 @@ export function createProviderNetworkTransport(
   const attempt = options.attempt ?? fetchCandidate;
   return async (target, input, init) => {
     const candidates = boundedCandidates(target.addresses);
-    let lastConnectTimeout: unknown;
+    let lastConnectError: unknown;
     for (const [index, candidate] of candidates.entries()) {
       try {
         const { response, agent } = await attempt(target.url, input, init, candidate);
         return closeAgentWithResponse(response, agent);
       } catch (error) {
-        if (!isConnectTimeout(error)) {
+        const errorCode = retryableConnectErrorCode(error);
+        if (!errorCode) {
           throw error;
         }
-        lastConnectTimeout = error;
+        lastConnectError = error;
         logger?.warn(
           {
             candidateAttempt: index + 1,
             candidateCount: candidates.length,
-            errorCode: "UND_ERR_CONNECT_TIMEOUT",
+            errorCode,
           },
-          "provider network candidate timed out",
+          "provider network candidate unavailable",
         );
       }
     }
-    throw lastConnectTimeout ?? new TypeError("provider network request failed");
+    throw lastConnectError ?? new TypeError("provider network request failed");
   };
 }
 
@@ -99,11 +106,16 @@ function candidateAgent(candidate: ResolvedAddress): Agent {
     connect: {
       timeout: candidateConnectTimeoutMs,
       lookup(_hostname, options, callback) {
-        if (options.all) {
-          callback(null, [{ address: candidate.address, family: candidate.family }] as never);
-        } else {
-          callback(null, candidate.address, candidate.family);
-        }
+        // Real DNS lookup callbacks are asynchronous. Deferring the pinned
+        // answer gives Node/Undici time to attach socket error listeners before
+        // an unreachable candidate can fail synchronously.
+        queueMicrotask(() => {
+          if (options.all) {
+            callback(null, [{ address: candidate.address, family: candidate.family }] as never);
+          } else {
+            callback(null, candidate.address, candidate.family);
+          }
+        });
       },
     },
   });
@@ -172,17 +184,18 @@ function closeAgentWithResponse(response: Awaited<ReturnType<typeof undiciFetch>
   return new Response(body, responseInit);
 }
 
-function isConnectTimeout(error: unknown, seen = new Set<unknown>()): boolean {
+function retryableConnectErrorCode(error: unknown, seen = new Set<unknown>()): string | undefined {
   if (!error || typeof error !== "object" || seen.has(error)) {
-    return false;
+    return undefined;
   }
   seen.add(error);
   const record = error as { code?: unknown; cause?: unknown; errors?: unknown };
-  if (record.code === "UND_ERR_CONNECT_TIMEOUT") {
-    return true;
+  if (typeof record.code === "string" && retryableConnectErrorCodes.has(record.code)) {
+    return record.code;
   }
   if (Array.isArray(record.errors)) {
-    return record.errors.length > 0 && record.errors.every((item) => isConnectTimeout(item, seen));
+    const codes = record.errors.map((item) => retryableConnectErrorCode(item, seen));
+    return codes.length > 0 && codes.every(Boolean) ? (codes[0] ?? undefined) : undefined;
   }
-  return isConnectTimeout(record.cause, seen);
+  return retryableConnectErrorCode(record.cause, seen);
 }

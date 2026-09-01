@@ -87,6 +87,46 @@ describe("provider network transport", () => {
     }
   });
 
+  it("handles an unreachable IPv6 socket and completes through the next IPv4 candidate", async () => {
+    const server = createServer((_request, response) => response.end("ipv4"));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const uncaught: unknown[] = [];
+    const unhandled: unknown[] = [];
+    const onUncaught = (error: unknown) => uncaught.push(error);
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP server address");
+      const networkTarget = {
+        url: new URL(`http://provider.test:${address.port}/data`),
+        addresses: [
+          { address: "2001:db8::1", family: 6 },
+          { address: "127.0.0.1", family: 4 },
+        ],
+      };
+      const transport = createProviderNetworkTransport();
+
+      await expect((await transport(networkTarget, networkTarget.url)).text()).resolves.toBe("ipv4");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(uncaught).toEqual([]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUnhandled);
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        }),
+      );
+    }
+  });
+
   it("tries the next SSRF-approved candidate after an exact connect timeout", async () => {
     const successfulAgent = agent();
     const attempt = vi
