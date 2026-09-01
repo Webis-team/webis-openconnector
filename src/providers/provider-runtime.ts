@@ -53,10 +53,14 @@ export function setProviderResolvedTransport(transport: GuardedFetchResolvedTran
  */
 export function createProviderFetch(options: ProviderFetchOptions = {}): ProviderFetch {
   const baseFetch = options.fetch;
+  const resolvedTransport =
+    baseFetch === undefined && !options.skipDnsValidation
+      ? (target: Parameters<GuardedFetchResolvedTransport>[0], input: RequestInfo | URL, init?: RequestInit) =>
+          providerResolvedTransport?.(target, input, init) ?? globalThis.fetch(input, init)
+      : undefined;
   return createGuardedFetch({
     fetch: baseFetch,
-    resolvedTransport: (target, input, init) =>
-      providerResolvedTransport?.(target, input, init) ?? (baseFetch ?? globalThis.fetch)(input, init),
+    resolvedTransport,
     allowPrivateNetwork: options.allowPrivateNetwork,
     skipDnsValidation: options.skipDnsValidation,
     additionalSensitiveHeaders: options.additionalSensitiveHeaders,

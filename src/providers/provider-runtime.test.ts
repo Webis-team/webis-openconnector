@@ -2,9 +2,11 @@ import type { ExecutionContext, ResolvedCredential } from "../core/types.ts";
 import type { ProviderActionHandlers, ProviderActionSources } from "./provider-runtime.ts";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setDefaultGuardedFetchDnsLookup } from "../core/guarded-fetch.ts";
 import { isPrivateNetworkAccessAllowed, setPrivateNetworkAccessAllowed } from "../core/request.ts";
 import {
   createProviderTimeout,
+  createProviderFetch,
   createProviderProxyUrl,
   defineOAuthProviderExecutors,
   defineProviderExecutors,
@@ -12,12 +14,38 @@ import {
   mapProviderActionSources,
   providerFetch,
   readProviderJson,
+  setProviderResolvedTransport,
   toProviderExecutionError,
 } from "./provider-runtime.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   setPrivateNetworkAccessAllowed(false);
+  setProviderResolvedTransport(undefined);
+  setDefaultGuardedFetchDnsLookup(null);
+});
+
+describe("createProviderFetch transport selection", () => {
+  it("applies the Node transport configured after the shared provider fetch was created", async () => {
+    const resolvedTransport = vi.fn(async () => new Response("pinned"));
+    setDefaultGuardedFetchDnsLookup(async () => [{ address: "93.184.216.34", family: 4 }]);
+    setProviderResolvedTransport(resolvedTransport);
+
+    await expect((await providerFetch("https://api.example.com/data")).text()).resolves.toBe("pinned");
+    expect(resolvedTransport).toHaveBeenCalledOnce();
+  });
+
+  it("preserves an explicitly injected fetch after the Node resolved transport is configured", async () => {
+    const customFetch = vi.fn(async () => new Response("custom"));
+    const resolvedTransport = vi.fn(async () => new Response("pinned"));
+    setDefaultGuardedFetchDnsLookup(async () => [{ address: "93.184.216.34", family: 4 }]);
+    setProviderResolvedTransport(resolvedTransport);
+    const fetcher = createProviderFetch({ fetch: customFetch as typeof fetch });
+
+    await expect((await fetcher("https://api.example.com/data")).text()).resolves.toBe("custom");
+    expect(customFetch).toHaveBeenCalledOnce();
+    expect(resolvedTransport).not.toHaveBeenCalled();
+  });
 });
 
 describe("toProviderExecutionError", () => {

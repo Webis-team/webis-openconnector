@@ -113,6 +113,16 @@ describe("createGuardedFetch resolved transport", () => {
     expect(resolvedTransport).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);
   });
+
+  it("uses the original transport when DNS validation is intentionally skipped", async () => {
+    const { transport, calls } = createTransport([new Response("ok")]);
+    const resolvedTransport = vi.fn();
+    const guarded = createGuardedFetch({ fetch: transport, skipDnsValidation: true, resolvedTransport });
+
+    await expect((await guarded("https://api.example.com/items")).text()).resolves.toBe("ok");
+    expect(resolvedTransport).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
 });
 
 describe("createGuardedFetch redirects", () => {
