@@ -22,7 +22,6 @@ import { cleanupStagedTransitFiles, createNodeTransitFileUpload } from "./files/
 import { S3TransitFileService } from "./files/s3-transit-files.ts";
 import { TransitFileService } from "./files/transit-files.ts";
 import { logger } from "./logger.ts";
-import { configureProviderNetwork } from "./network-runtime.ts";
 import { createSecretCodec } from "./secrets/secret-codec.ts";
 import { createNodeRuntimeDatabase } from "./storage/node-runtime-database.ts";
 import { DEFAULT_RUN_LIMIT } from "./storage/runtime-store.ts";
@@ -46,8 +45,6 @@ try {
 }
 
 async function main(): Promise<void> {
-  configureProviderNetwork();
-  logger.info({ dnsResultOrder: "ipv4first" }, "provider network address order configured");
   setPrivateNetworkAccessAllowed(parsePrivateNetworkAccessFlag(process.env.OOMOL_CONNECT_ALLOW_PRIVATE_NETWORK));
   setEgressTrustedHosts(parseEgressTrustedHosts(process.env.OOMOL_CONNECT_EGRESS_TRUSTED_HOSTS));
 
