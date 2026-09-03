@@ -34,6 +34,8 @@ export interface ProviderFetchOptions {
    * derived from user/credential input. See {@link GuardedFetchOptions.skipDnsValidation}.
    */
   skipDnsValidation?: boolean;
+  /** Reject the first redirect response instead of issuing a request to its Location. */
+  rejectRedirects?: boolean;
   /** Additional credential-bearing headers to strip from cross-origin redirects. */
   additionalSensitiveHeaders?: readonly string[];
 }
@@ -63,6 +65,7 @@ export function createProviderFetch(options: ProviderFetchOptions = {}): Provide
     resolvedTransport,
     allowPrivateNetwork: options.allowPrivateNetwork,
     skipDnsValidation: options.skipDnsValidation,
+    maxRedirects: options.rejectRedirects ? 0 : undefined,
     additionalSensitiveHeaders: options.additionalSensitiveHeaders,
     mapTransportError: (error) =>
       error instanceof TypeError
@@ -201,6 +204,8 @@ export interface ProviderExecutorDefinition<TContext> {
   allowPrivateNetwork?: () => boolean;
   /** Skip the redundant DNS resolved-address check; only for hardcoded-host providers. */
   skipDnsValidation?: boolean;
+  /** Reject the first redirect response instead of issuing a second request. */
+  rejectRedirects?: boolean;
 }
 
 export interface BearerCredential {
@@ -309,6 +314,8 @@ export interface ProviderProxyDefinition {
   allowPrivateNetwork?: () => boolean;
   /** Skip the redundant DNS resolved-address check; only for hardcoded-base-URL proxies. */
   skipDnsValidation?: boolean;
+  /** Reject the first redirect response instead of issuing a second request. */
+  rejectRedirects?: boolean;
 }
 
 const blockedProxyRequestHeaders = new Set([
@@ -490,6 +497,7 @@ export function defineProviderProxy(input: ProviderProxyDefinition): ProviderPro
   const egressFetch = createProviderFetch({
     allowPrivateNetwork: input.allowPrivateNetwork,
     skipDnsValidation: input.skipDnsValidation,
+    rejectRedirects: input.rejectRedirects,
     additionalSensitiveHeaders,
   });
   return async (proxyInput: ProxyRequestInput, context: ExecutionContext): Promise<ProxyExecutionResult> => {
@@ -910,10 +918,11 @@ export function defineProviderExecutors<TContext>(input: ProviderExecutorDefinit
   const executors: ProviderExecutors = {};
   const fallbackMessage = input.fallbackMessage ?? "provider request failed";
   const egressFetch =
-    input.allowPrivateNetwork || input.skipDnsValidation
+    input.allowPrivateNetwork || input.skipDnsValidation || input.rejectRedirects
       ? createProviderFetch({
           allowPrivateNetwork: input.allowPrivateNetwork,
           skipDnsValidation: input.skipDnsValidation,
+          rejectRedirects: input.rejectRedirects,
         })
       : providerFetch;
   for (const [name, handler] of Object.entries(input.handlers)) {
