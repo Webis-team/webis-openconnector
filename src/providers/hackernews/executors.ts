@@ -134,6 +134,8 @@ export const executors: ProviderExecutors = defineProviderExecutors<HackerNewsAc
   createContext(_context, fetcher): HackerNewsActionContext {
     return { fetcher };
   },
+  skipDnsValidation: true,
+  rejectRedirects: true,
 });
 
 async function getStoryIdList(
@@ -370,4 +372,6 @@ export const proxy: ProviderProxyExecutor = defineProviderProxy({
   service,
   baseUrl: "https://hacker-news.firebaseio.com/v0",
   auth: { type: "none" },
+  skipDnsValidation: true,
+  rejectRedirects: true,
 });
