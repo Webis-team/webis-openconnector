@@ -136,6 +136,8 @@ export class ConnectServer {
     app.get("/v1/providers", (context) => this.listRuntimeProviders(context));
     app.get("/v1/actions", (context) => this.listRuntimeActions(context));
     app.get("/v1/actions/search", (context) => this.searchRuntimeActions(context));
+    app.get("/v1/actions/catalog/services", (context) => this.listPriceableRuntimeServices(context));
+    app.get("/v1/actions/catalog", (context) => this.listPriceableRuntimeActions(context));
     app.get("/v1/actions/:actionId", (context) => this.getRuntimeAction(context, context.req.param("actionId")));
     app.post("/v1/actions/:actionId", (context) => this.createRuntimeActionRun(context, context.req.param("actionId")));
     app.get("/v1/apps", (context) => this.listRuntimeApps(context));
@@ -414,6 +416,102 @@ export class ConnectServer {
 
     const actions = this.options.catalog.actions.filter((action) => action.service === service);
     return writeRuntimeSuccess(context, actions.map(serializeRuntimeAction));
+  }
+
+  private async listPriceableRuntimeActions(context: Context): Promise<Response> {
+    const q = optionalString(context.req.query("q"))?.toLowerCase() ?? "";
+    const exactActionId = optionalString(context.req.query("exactActionId"));
+    const service = optionalString(context.req.query("service"));
+    const limit = Number(context.req.query("limit") ?? "50");
+    const offset = Number(context.req.query("offset") ?? "0");
+    if (q.length > 256 || (exactActionId?.length ?? 0) > 256 || (service?.length ?? 0) > 128 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) {
+      return writeRuntimeFailure(context, {
+        status: 400,
+        errorCode: "invalid_input",
+        message: "q, limit, or offset is invalid.",
+      });
+    }
+    const available = await this.priceableRuntimeActions(context);
+    if (available instanceof Response) return available;
+    const serviceName = service?.toLowerCase();
+    const provider = serviceName ? this.options.catalog.providers.find((item) => item.service.toLowerCase() === serviceName) : undefined;
+    const serviceMatched = Boolean(serviceName && q && [serviceName, provider?.displayName ?? ""].join(" ").toLowerCase().includes(q));
+    const items = available
+      .filter((action) => !serviceName || action.service.toLowerCase() === serviceName)
+      .filter((action) => !exactActionId || action.id === exactActionId)
+      .filter((action) => !q || serviceMatched || [action.id, action.name, action.description].join(" ").toLowerCase().includes(q))
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
+      .map((action) => ({
+        actionId: action.id,
+        service: action.service ?? action.id.split(".", 1)[0] ?? "",
+        title: action.name,
+        description: action.description,
+        availability: "available",
+        priceable: true,
+      }));
+    this.options.logger?.info(
+      { path: context.req.path, service: serviceName, exact: Boolean(exactActionId), returned: Math.min(limit, Math.max(0, items.length - offset)), total: items.length },
+      "priceable action catalog listed",
+    );
+    return writeRuntimeSuccess(context, { items: items.slice(offset, offset + limit), total: items.length });
+  }
+
+  private async listPriceableRuntimeServices(context: Context): Promise<Response> {
+    const q = optionalString(context.req.query("q"))?.toLowerCase() ?? "";
+    const limit = Number(context.req.query("limit") ?? "20");
+    const offset = Number(context.req.query("offset") ?? "0");
+    if (q.length > 256 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) {
+      return writeRuntimeFailure(context, { status: 400, errorCode: "invalid_input", message: "q, limit, or offset is invalid." });
+    }
+    const available = await this.priceableRuntimeActions(context);
+    if (available instanceof Response) return available;
+    const providers = new Map(this.options.catalog.providers.map((provider) => [provider.service, provider]));
+    const grouped = new Map<string, RuntimeActionDefinition[]>();
+    for (const action of available) {
+      const actions = grouped.get(action.service);
+      if (actions) actions.push(action);
+      else grouped.set(action.service, [action]);
+    }
+    const items = [...grouped].flatMap(([service, actions]) => {
+      const displayName = providers.get(service)?.displayName ?? service;
+      const serviceMatched = !q || [service, displayName].join(" ").toLowerCase().includes(q);
+      const matches = serviceMatched ? actions : actions.filter((action) => [action.id, action.name, action.description].join(" ").toLowerCase().includes(q));
+      return matches.length ? [{ service, displayName, actionCount: matches.length, serviceMatched }] : [];
+    }).sort((left, right) => left.displayName.localeCompare(right.displayName) || left.service.localeCompare(right.service));
+    return writeRuntimeSuccess(context, { items: items.slice(offset, offset + limit), total: items.length });
+  }
+
+  private async priceableRuntimeActions(context: Context): Promise<RuntimeActionDefinition[] | Response> {
+    let policy: ActionPolicySnapshot;
+    try {
+      policy = await this.getPolicySnapshot(context);
+    } catch {
+      return writeRuntimeFailure(context, {
+        status: 500,
+        errorCode: "internal_error",
+        message: "Runtime policy is unavailable.",
+      });
+    }
+    let connections: ConnectionSummary[];
+    try {
+      connections = await this.options.connections.listConnections();
+    } catch {
+      this.options.logger?.error({ path: context.req.path }, "priceable action catalog connections unavailable");
+      return writeRuntimeFailure(context, {
+        status: 500,
+        errorCode: "internal_error",
+        message: "Runtime connections are unavailable.",
+      });
+    }
+    const configuredServices = new Set(
+      this.filterAllowedConnections(policy, connections)
+        .filter((connection) => connection.configured && connection.default)
+        .map((connection) => connection.service),
+    );
+    return [...this.options.catalog.actions]
+      .filter((action) => action.execution.locallyExecutable)
+      .filter((action) => configuredServices.has(action.service))
+      .filter((action) => policy.evaluate(action).allowed);
   }
 
   private async searchRuntimeActions(context: Context): Promise<Response> {

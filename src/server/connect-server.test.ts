@@ -386,6 +386,135 @@ describe("ConnectServer", () => {
     await expect(actionResponse.json()).resolves.toHaveProperty("inputSchema");
   });
 
+  it("serves a stable paged action catalog for pricing", async () => {
+    const action = echoAction;
+    const actions = [
+      { ...action, id: "example.zeta", name: "zeta", description: "Zeta action" },
+      { ...action, id: "example.echo", name: "echo", description: "Echo action" },
+    ];
+    const app = createTestServer([{
+      ...apiKeyProvider,
+      authTypes: ["no_auth"],
+      auth: [{ type: "no_auth" }],
+      actions,
+    }], {
+      auth: { runtimeToken: "runtime-token" },
+      executableActionIds: ["example.echo", "example.zeta"],
+    }).createApp();
+    const headers = { authorization: "Bearer runtime-token" };
+
+    const response = await app.request("/v1/actions/catalog?q=action&limit=1&offset=0", { headers });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        total: 2,
+        items: [{ actionId: "example.echo", title: "echo", availability: "available", priceable: true }],
+      },
+    });
+    const exact = await app.request("/v1/actions/catalog?exactActionId=example.zeta&limit=1&offset=0", { headers });
+    await expect(exact.json()).resolves.toMatchObject({ data: { total: 1, items: [{ actionId: "example.zeta", service: "example" }] } });
+    const missing = await app.request("/v1/actions/catalog?exactActionId=example.missing&limit=1&offset=0", { headers });
+    await expect(missing.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
+    const services = await app.request("/v1/actions/catalog/services?q=zeta&limit=1&offset=0", { headers });
+    await expect(services.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ service: "example", actionCount: 1, serviceMatched: false }] },
+    });
+    const children = await app.request("/v1/actions/catalog?service=example&q=zeta&limit=1&offset=0", { headers });
+    await expect(children.json()).resolves.toMatchObject({ data: { total: 1, items: [{ actionId: "example.zeta" }] } });
+    expect((await app.request("/v1/actions/catalog?limit=0", { headers })).status).toBe(400);
+    expect((await app.request("/v1/actions/catalog?offset=-1", { headers })).status).toBe(400);
+    expect(actions.map((item) => item.id)).toEqual(["example.zeta", "example.echo"]);
+  });
+
+  it("excludes locally executable actions without an allowed configured default connection", async () => {
+    const provider = { ...apiKeyProvider, actions: [echoAction] };
+    const app = createTestServer([provider], { auth: { runtimeToken: "runtime-token" } }).createApp();
+    const response = await app.request("/v1/actions/catalog", { headers: { authorization: "Bearer runtime-token" } });
+    await expect(response.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
+  });
+
+  it("excludes actions whose only configured connection is non-default", async () => {
+    const app = createTestServer([{ ...apiKeyProvider, actions: [echoAction] }], {
+      auth: { runtimeToken: "runtime-token" },
+      providerLoader: new ProxyProviderLoader(),
+    }).createApp();
+    expect((await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", connectionName: "work", values: { apiKey: "work-key" } }),
+    })).status).toBe(200);
+
+    const response = await app.request("/v1/actions/catalog?exactActionId=example.echo", {
+      headers: { authorization: "Bearer runtime-token" },
+    });
+    await expect(response.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
+  });
+
+  it("applies runtime connection grants and action policy to the pricing catalog", async () => {
+    const runtimeTokens = new RuntimeTokenService(new MemoryRuntimeTokenStore());
+    const app = createTestServer([{ ...apiKeyProvider, actions: [echoAction] }], {
+      providerLoader: new ProxyProviderLoader(),
+      runtimeTokens,
+    }).createApp();
+    const connected = await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "default-key" } }),
+    });
+    expect(connected.status).toBe(200);
+    const { token } = await runtimeTokens.createToken("denied default connection", {
+      allowedActions: [],
+      blockedActions: [],
+      allowedProxies: [],
+      allowedConnections: ["another-connection"],
+    });
+
+    const denied = await app.request("/v1/actions/catalog?exactActionId=example.echo", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await expect(denied.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
+
+    const blockedApp = createTestServer([{
+      ...apiKeyProvider,
+      authTypes: ["no_auth"],
+      auth: [{ type: "no_auth" }],
+      actions: [{ ...echoAction, id: "example.blocked", name: "blocked" }],
+    }], {
+      actionPolicy: new LocalActionPolicyService({ blockedActions: ["example.blocked"] }),
+      executableActionIds: ["example.blocked"],
+    }).createApp();
+    const deploymentOnly = await blockedApp.request("/v1/actions/catalog?exactActionId=example.blocked");
+    await expect(deploymentOnly.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
+  });
+
+  it("fails the pricing catalog closed when runtime policy cannot be read", async () => {
+    const runtimePolicyStore = new MemoryRuntimePolicyStore();
+    runtimePolicyStore.failure = new Error("unavailable");
+    const app = createTestServer([{
+      ...apiKeyProvider,
+      authTypes: ["no_auth"],
+      auth: [{ type: "no_auth" }],
+      actions: [echoAction],
+    }], { runtimePolicyStore }).createApp();
+
+    const response = await app.request("/v1/actions/catalog");
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ errorCode: "internal_error" });
+  });
+
+  it("fails the pricing catalog closed when configured connections cannot be read", async () => {
+    const app = createTestServer([{
+      ...apiKeyProvider,
+      authTypes: ["no_auth"],
+      auth: [{ type: "no_auth" }],
+      actions: [echoAction],
+    }], { connectionStore: new FailingConnectionStore() }).createApp();
+
+    const response = await app.request("/v1/actions/catalog");
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ errorCode: "internal_error" });
+  });
+
   it("answers /api/providers conditional requests with 304 when the ETag matches", async () => {
     const app = createTestServer([apiKeyProvider]).createApp();
 
@@ -3557,11 +3686,14 @@ interface CreateTestServerOptions {
   uploadTransitFile?: (request: Request) => Promise<TransitFileUpload>;
   secretCodec?: ISecretCodec;
   allowedCustomOAuth?: string[];
+  connections?: StoredConnection[];
+  connectionStore?: IConnectionStore;
+  executableActionIds?: string[];
 }
 
 function createTestServer(providers: ProviderDefinition[], options: CreateTestServerOptions = {}): ConnectServer {
   const catalog = createCatalogStore(providers, {
-    executableActionIds: ["example.echo"],
+    executableActionIds: options.executableActionIds ?? ["example.echo"],
   });
   const providerLoader = options.providerLoader ?? new EmptyProviderLoader();
   const idempotency = options.idempotency ?? new MemoryIdempotencyStore();
@@ -3570,7 +3702,7 @@ function createTestServer(providers: ProviderDefinition[], options: CreateTestSe
   const connections = new ConnectionService({
     catalog,
     providerLoader,
-    store: new MemoryConnectionStore(),
+    store: options.connectionStore ?? new MemoryConnectionStore(options.connections),
   });
   const allowedCustomOAuth = new Set(options.allowedCustomOAuth);
   const isCustomClientConfigAllowed = (service: string): boolean =>
@@ -3822,6 +3954,10 @@ class TransitEchoProviderLoader extends EchoProviderLoader {
 class MemoryConnectionStore implements IConnectionStore {
   private readonly store = new Map<string, StoredConnection>();
 
+  constructor(initial: StoredConnection[] = []) {
+    for (const connection of initial) this.store.set(createConnectionKey(connection.service, connection.connectionName), connection);
+  }
+
   async get(service: string, connectionName: string): Promise<StoredConnection | undefined> {
     return this.store.get(createConnectionKey(service, connectionName));
   }
@@ -3853,6 +3989,12 @@ class MemoryConnectionStore implements IConnectionStore {
 
   async list(): Promise<StoredConnection[]> {
     return [...this.store.values()];
+  }
+}
+
+class FailingConnectionStore extends MemoryConnectionStore {
+  override async list(): Promise<StoredConnection[]> {
+    throw new Error("unavailable");
   }
 }
 
@@ -3937,11 +4079,13 @@ class MemoryRuntimeTokenStore implements IRuntimeTokenStore {
 
 class MemoryRuntimePolicyStore implements IRuntimePolicyStore {
   record?: RuntimePolicyRecord;
+  failure?: Error;
   reads = 0;
   writes = 0;
 
   async get(): Promise<RuntimePolicyRecord | undefined> {
     this.reads += 1;
+    if (this.failure) throw this.failure;
     return this.record;
   }
 

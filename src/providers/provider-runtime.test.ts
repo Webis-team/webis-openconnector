@@ -2,9 +2,11 @@ import type { ExecutionContext, ResolvedCredential } from "../core/types.ts";
 import type { ProviderActionHandlers, ProviderActionSources } from "./provider-runtime.ts";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setDefaultGuardedFetchDnsLookup } from "../core/guarded-fetch.ts";
 import { isPrivateNetworkAccessAllowed, setPrivateNetworkAccessAllowed } from "../core/request.ts";
 import {
   createProviderTimeout,
+  createProviderFetch,
   createProviderProxyUrl,
   defineOAuthProviderExecutors,
   defineProviderExecutors,
@@ -12,12 +14,38 @@ import {
   mapProviderActionSources,
   providerFetch,
   readProviderJson,
+  setProviderResolvedTransport,
   toProviderExecutionError,
 } from "./provider-runtime.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   setPrivateNetworkAccessAllowed(false);
+  setProviderResolvedTransport(undefined);
+  setDefaultGuardedFetchDnsLookup(null);
+});
+
+describe("createProviderFetch transport selection", () => {
+  it("applies the Node transport configured after the shared provider fetch was created", async () => {
+    const resolvedTransport = vi.fn(async () => new Response("pinned"));
+    setDefaultGuardedFetchDnsLookup(async () => [{ address: "93.184.216.34", family: 4 }]);
+    setProviderResolvedTransport(resolvedTransport);
+
+    await expect((await providerFetch("https://api.example.com/data")).text()).resolves.toBe("pinned");
+    expect(resolvedTransport).toHaveBeenCalledOnce();
+  });
+
+  it("preserves an explicitly injected fetch after the Node resolved transport is configured", async () => {
+    const customFetch = vi.fn(async () => new Response("custom"));
+    const resolvedTransport = vi.fn(async () => new Response("pinned"));
+    setDefaultGuardedFetchDnsLookup(async () => [{ address: "93.184.216.34", family: 4 }]);
+    setProviderResolvedTransport(resolvedTransport);
+    const fetcher = createProviderFetch({ fetch: customFetch as typeof fetch });
+
+    await expect((await fetcher("https://api.example.com/data")).text()).resolves.toBe("custom");
+    expect(customFetch).toHaveBeenCalledOnce();
+    expect(resolvedTransport).not.toHaveBeenCalled();
+  });
 });
 
 describe("toProviderExecutionError", () => {
@@ -328,6 +356,25 @@ describe("provider egress SSRF guard", () => {
     expect(calls.map((call) => call.url)).toEqual(["https://api.example.com/items", "https://cdn.example.net/items"]);
   });
 
+  it("rejects the first proxy redirect without fetching its public target when configured", async () => {
+    const calls = stubFetchSequence([
+      new Response(null, { status: 302, headers: { location: "https://cdn.example.net/items" } }),
+    ]);
+    const proxy = defineProviderProxy({
+      service: "test_service",
+      baseUrl: "https://api.example.com",
+      auth: { type: "none" },
+      skipDnsValidation: true,
+      rejectRedirects: true,
+    });
+
+    const result = await proxy({ method: "GET", endpoint: "/items" }, executionContext);
+
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("https://api.example.com/items");
+  });
+
   it("gives executor contexts a fetcher that blocks redirects to loopback targets", async () => {
     const calls = stubFetchSequence([
       new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8080/admin" } }),
@@ -348,6 +395,29 @@ describe("provider egress SSRF guard", () => {
     expect(result.ok).toBe(false);
     expect(result.error?.message).toContain("redirect location");
     expect(calls).toHaveLength(1);
+  });
+
+  it("rejects the first executor redirect without fetching its public target when configured", async () => {
+    const calls = stubFetchSequence([
+      new Response(null, { status: 302, headers: { location: "https://cdn.example.net/items" } }),
+    ]);
+    const executors = defineProviderExecutors<{ fetcher: typeof fetch }>({
+      service: "test_service",
+      handlers: {
+        async probe(_input, context) {
+          return { status: (await context.fetcher("https://api.example.com/items")).status };
+        },
+      },
+      createContext: (_context, fetcher) => ({ fetcher }),
+      skipDnsValidation: true,
+      rejectRedirects: true,
+    });
+
+    const result = await executors["test_service.probe"]!({}, executionContext);
+
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("https://api.example.com/items");
   });
 
   it("keeps caller manual-redirect handling intact through providerFetch", async () => {

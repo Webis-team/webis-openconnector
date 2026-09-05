@@ -1,0 +1,203 @@
+import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { createProviderNetworkTransport } from "./provider-network-transport.ts";
+
+const target = {
+  url: new URL("https://provider.test/data"),
+  addresses: [
+    { address: "192.0.2.1", family: 4 },
+    { address: "192.0.2.2", family: 4 },
+  ],
+};
+
+function agent() {
+  return {
+    close: vi.fn(async () => undefined),
+    destroy: vi.fn(async () => undefined),
+  };
+}
+
+describe("provider network transport", () => {
+  it("pins a real Undici request when Node asks the custom lookup for all addresses", async () => {
+    const server = createServer((_request, response) => {
+      response.end("pinned");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP server address");
+      const pinnedTarget = {
+        url: new URL(`http://provider.test:${address.port}/data`),
+        addresses: [{ address: "127.0.0.1", family: 4 }],
+      };
+      const transport = createProviderNetworkTransport();
+
+      await expect((await transport(pinnedTarget, pinnedTarget.url)).text()).resolves.toBe("pinned");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        }),
+      );
+    }
+  });
+
+  it("falls through a connect timeout to a real pinned Undici request", async () => {
+    const server = createServer((_request, response) => response.end("fallback"));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP server address");
+      const fallbackTarget = {
+        url: new URL(`http://provider.test:${address.port}/data`),
+        addresses: [
+          { address: "192.0.2.1", family: 4 },
+          { address: "127.0.0.1", family: 4 },
+        ],
+      };
+      const pinnedTransport = createProviderNetworkTransport();
+      const outerAgent = agent();
+      const attempt = vi.fn(async (_url, input, init, candidate) => {
+        if (candidate.address === "192.0.2.1") {
+          throw Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" });
+        }
+        return {
+          response: await pinnedTransport({ ...fallbackTarget, addresses: [candidate] }, input, init),
+          agent: outerAgent,
+        };
+      });
+      const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+
+      await expect((await transport(fallbackTarget, fallbackTarget.url)).text()).resolves.toBe("fallback");
+      expect(attempt).toHaveBeenCalledTimes(2);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        }),
+      );
+    }
+  });
+
+  it("handles an unreachable IPv6 socket and completes through the next IPv4 candidate", async () => {
+    const server = createServer((_request, response) => response.end("ipv4"));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const uncaught: unknown[] = [];
+    const unhandled: unknown[] = [];
+    const onUncaught = (error: unknown) => uncaught.push(error);
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP server address");
+      const networkTarget = {
+        url: new URL(`http://provider.test:${address.port}/data`),
+        addresses: [
+          { address: "2001:db8::1", family: 6 },
+          { address: "127.0.0.1", family: 4 },
+        ],
+      };
+      const transport = createProviderNetworkTransport();
+
+      await expect((await transport(networkTarget, networkTarget.url)).text()).resolves.toBe("ipv4");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(uncaught).toEqual([]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUnhandled);
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        }),
+      );
+    }
+  });
+
+  it("tries the next SSRF-approved candidate after an exact connect timeout", async () => {
+    const successfulAgent = agent();
+    const attempt = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" }))
+      .mockResolvedValueOnce({ response: new Response('{"ok":true}'), agent: successfulAgent });
+    const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+
+    const response = await transport(target, target.url);
+
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(attempt.mock.calls.map((call) => call[3])).toEqual(target.addresses);
+    expect(successfulAgent.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry TLS or other non-connect failures", async () => {
+    const failure = Object.assign(new Error("certificate rejected"), { code: "CERT_HAS_EXPIRED" });
+    const attempt = vi.fn().mockRejectedValue(failure);
+    const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+
+    await expect(transport(target, target.url)).rejects.toBe(failure);
+    expect(attempt).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry a mixed aggregate of connect timeout and TLS failure", async () => {
+    const failure = new AggregateError([
+      Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" }),
+      Object.assign(new Error("certificate rejected"), { code: "CERT_HAS_EXPIRED" }),
+    ]);
+    const attempt = vi.fn().mockRejectedValue(failure);
+    const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+
+    await expect(transport(target, target.url)).rejects.toBe(failure);
+    expect(attempt).toHaveBeenCalledOnce();
+  });
+
+  it("deduplicates and family-interleaves at most four candidates within the 12 second budget", async () => {
+    const addresses = [
+      { address: "192.0.2.1", family: 4 },
+      { address: "192.0.2.1", family: 4 },
+      { address: "192.0.2.2", family: 4 },
+      { address: "2001:db8::1", family: 6 },
+      { address: "192.0.2.3", family: 4 },
+      { address: "2001:db8::2", family: 6 },
+      { address: "192.0.2.4", family: 4 },
+    ];
+    const timeout = () => Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" });
+    const attempt = vi.fn().mockImplementation(async () => Promise.reject(timeout()));
+    const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+
+    await expect(transport({ ...target, addresses }, target.url)).rejects.toMatchObject({
+      code: "UND_ERR_CONNECT_TIMEOUT",
+    });
+    expect(attempt.mock.calls.map((call) => call[3])).toEqual([
+      { address: "192.0.2.1", family: 4 },
+      { address: "2001:db8::1", family: 6 },
+      { address: "192.0.2.2", family: 4 },
+      { address: "2001:db8::2", family: 6 },
+    ]);
+    expect(attempt).toHaveBeenCalledTimes(4);
+  });
+
+  it("closes the successful dispatcher when the caller cancels the response body", async () => {
+    const successfulAgent = agent();
+    const attempt = vi.fn().mockResolvedValue({ response: new Response("payload"), agent: successfulAgent });
+    const transport = createProviderNetworkTransport(undefined, { attempt: attempt as never });
+    const response = await transport(target, target.url);
+
+    await response.body?.cancel();
+
+    expect(successfulAgent.close).toHaveBeenCalledOnce();
+  });
+});
