@@ -392,15 +392,20 @@ describe("ConnectServer", () => {
       { ...action, id: "example.zeta", name: "zeta", description: "Zeta action" },
       { ...action, id: "example.echo", name: "echo", description: "Echo action" },
     ];
-    const app = createTestServer([{
-      ...apiKeyProvider,
-      authTypes: ["no_auth"],
-      auth: [{ type: "no_auth" }],
-      actions,
-    }], {
-      auth: { runtimeToken: "runtime-token" },
-      executableActionIds: ["example.echo", "example.zeta"],
-    }).createApp();
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          authTypes: ["no_auth"],
+          auth: [{ type: "no_auth" }],
+          actions,
+        },
+      ],
+      {
+        auth: { runtimeToken: "runtime-token" },
+        executableActionIds: ["example.echo", "example.zeta"],
+      },
+    ).createApp();
     const headers = { authorization: "Bearer runtime-token" };
 
     const response = await app.request("/v1/actions/catalog?q=action&limit=1&offset=0", { headers });
@@ -412,8 +417,12 @@ describe("ConnectServer", () => {
       },
     });
     const exact = await app.request("/v1/actions/catalog?exactActionId=example.zeta&limit=1&offset=0", { headers });
-    await expect(exact.json()).resolves.toMatchObject({ data: { total: 1, items: [{ actionId: "example.zeta", service: "example" }] } });
-    const missing = await app.request("/v1/actions/catalog?exactActionId=example.missing&limit=1&offset=0", { headers });
+    await expect(exact.json()).resolves.toMatchObject({
+      data: { total: 1, items: [{ actionId: "example.zeta", service: "example" }] },
+    });
+    const missing = await app.request("/v1/actions/catalog?exactActionId=example.missing&limit=1&offset=0", {
+      headers,
+    });
     await expect(missing.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
     const services = await app.request("/v1/actions/catalog/services?q=zeta&limit=1&offset=0", { headers });
     await expect(services.json()).resolves.toMatchObject({
@@ -438,11 +447,15 @@ describe("ConnectServer", () => {
       auth: { runtimeToken: "runtime-token" },
       providerLoader: new ProxyProviderLoader(),
     }).createApp();
-    expect((await app.request("/api/connections/example", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ authType: "api_key", connectionName: "work", values: { apiKey: "work-key" } }),
-    })).status).toBe(200);
+    expect(
+      (
+        await app.request("/api/connections/example", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ authType: "api_key", connectionName: "work", values: { apiKey: "work-key" } }),
+        })
+      ).status,
+    ).toBe(200);
 
     const response = await app.request("/v1/actions/catalog?exactActionId=example.echo", {
       headers: { authorization: "Bearer runtime-token" },
@@ -474,15 +487,20 @@ describe("ConnectServer", () => {
     });
     await expect(denied.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
 
-    const blockedApp = createTestServer([{
-      ...apiKeyProvider,
-      authTypes: ["no_auth"],
-      auth: [{ type: "no_auth" }],
-      actions: [{ ...echoAction, id: "example.blocked", name: "blocked" }],
-    }], {
-      actionPolicy: new LocalActionPolicyService({ blockedActions: ["example.blocked"] }),
-      executableActionIds: ["example.blocked"],
-    }).createApp();
+    const blockedApp = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          authTypes: ["no_auth"],
+          auth: [{ type: "no_auth" }],
+          actions: [{ ...echoAction, id: "example.blocked", name: "blocked" }],
+        },
+      ],
+      {
+        actionPolicy: new LocalActionPolicyService({ blockedActions: ["example.blocked"] }),
+        executableActionIds: ["example.blocked"],
+      },
+    ).createApp();
     const deploymentOnly = await blockedApp.request("/v1/actions/catalog?exactActionId=example.blocked");
     await expect(deploymentOnly.json()).resolves.toMatchObject({ data: { total: 0, items: [] } });
   });
@@ -490,12 +508,17 @@ describe("ConnectServer", () => {
   it("fails the pricing catalog closed when runtime policy cannot be read", async () => {
     const runtimePolicyStore = new MemoryRuntimePolicyStore();
     runtimePolicyStore.failure = new Error("unavailable");
-    const app = createTestServer([{
-      ...apiKeyProvider,
-      authTypes: ["no_auth"],
-      auth: [{ type: "no_auth" }],
-      actions: [echoAction],
-    }], { runtimePolicyStore }).createApp();
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          authTypes: ["no_auth"],
+          auth: [{ type: "no_auth" }],
+          actions: [echoAction],
+        },
+      ],
+      { runtimePolicyStore },
+    ).createApp();
 
     const response = await app.request("/v1/actions/catalog");
     expect(response.status).toBe(500);
@@ -503,12 +526,17 @@ describe("ConnectServer", () => {
   });
 
   it("fails the pricing catalog closed when configured connections cannot be read", async () => {
-    const app = createTestServer([{
-      ...apiKeyProvider,
-      authTypes: ["no_auth"],
-      auth: [{ type: "no_auth" }],
-      actions: [echoAction],
-    }], { connectionStore: new FailingConnectionStore() }).createApp();
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          authTypes: ["no_auth"],
+          auth: [{ type: "no_auth" }],
+          actions: [echoAction],
+        },
+      ],
+      { connectionStore: new FailingConnectionStore() },
+    ).createApp();
 
     const response = await app.request("/v1/actions/catalog");
     expect(response.status).toBe(500);
@@ -3955,7 +3983,8 @@ class MemoryConnectionStore implements IConnectionStore {
   private readonly store = new Map<string, StoredConnection>();
 
   constructor(initial: StoredConnection[] = []) {
-    for (const connection of initial) this.store.set(createConnectionKey(connection.service, connection.connectionName), connection);
+    for (const connection of initial)
+      this.store.set(createConnectionKey(connection.service, connection.connectionName), connection);
   }
 
   async get(service: string, connectionName: string): Promise<StoredConnection | undefined> {

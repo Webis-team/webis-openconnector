@@ -5,12 +5,7 @@ import { Agent, fetch as undiciFetch } from "undici";
 
 const candidateConnectTimeoutMs = 3_000;
 const maxCandidates = 4;
-const retryableConnectErrorCodes = new Set([
-  "EADDRNOTAVAIL",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "UND_ERR_CONNECT_TIMEOUT",
-]);
+const retryableConnectErrorCodes = new Set(["EADDRNOTAVAIL", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 
 interface CandidateAttempt {
   response: Awaited<ReturnType<typeof undiciFetch>>;

@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
+import { describe, expect, it, vi } from "vitest";
 import { createProviderNetworkTransport } from "./provider-network-transport.ts";
 
 const target = {

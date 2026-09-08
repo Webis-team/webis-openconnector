@@ -424,7 +424,16 @@ export class ConnectServer {
     const service = optionalString(context.req.query("service"));
     const limit = Number(context.req.query("limit") ?? "50");
     const offset = Number(context.req.query("offset") ?? "0");
-    if (q.length > 256 || (exactActionId?.length ?? 0) > 256 || (service?.length ?? 0) > 128 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) {
+    if (
+      q.length > 256 ||
+      (exactActionId?.length ?? 0) > 256 ||
+      (service?.length ?? 0) > 128 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100 ||
+      !Number.isInteger(offset) ||
+      offset < 0
+    ) {
       return writeRuntimeFailure(context, {
         status: 400,
         errorCode: "invalid_input",
@@ -434,12 +443,19 @@ export class ConnectServer {
     const available = await this.priceableRuntimeActions(context);
     if (available instanceof Response) return available;
     const serviceName = service?.toLowerCase();
-    const provider = serviceName ? this.options.catalog.providers.find((item) => item.service.toLowerCase() === serviceName) : undefined;
-    const serviceMatched = Boolean(serviceName && q && [serviceName, provider?.displayName ?? ""].join(" ").toLowerCase().includes(q));
+    const provider = serviceName
+      ? this.options.catalog.providers.find((item) => item.service.toLowerCase() === serviceName)
+      : undefined;
+    const serviceMatched = Boolean(
+      serviceName && q && [serviceName, provider?.displayName ?? ""].join(" ").toLowerCase().includes(q),
+    );
     const items = available
       .filter((action) => !serviceName || action.service.toLowerCase() === serviceName)
       .filter((action) => !exactActionId || action.id === exactActionId)
-      .filter((action) => !q || serviceMatched || [action.id, action.name, action.description].join(" ").toLowerCase().includes(q))
+      .filter(
+        (action) =>
+          !q || serviceMatched || [action.id, action.name, action.description].join(" ").toLowerCase().includes(q),
+      )
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
       .map((action) => ({
         actionId: action.id,
@@ -450,7 +466,13 @@ export class ConnectServer {
         priceable: true,
       }));
     this.options.logger?.info(
-      { path: context.req.path, service: serviceName, exact: Boolean(exactActionId), returned: Math.min(limit, Math.max(0, items.length - offset)), total: items.length },
+      {
+        path: context.req.path,
+        service: serviceName,
+        exact: Boolean(exactActionId),
+        returned: Math.min(limit, Math.max(0, items.length - offset)),
+        total: items.length,
+      },
       "priceable action catalog listed",
     );
     return writeRuntimeSuccess(context, { items: items.slice(offset, offset + limit), total: items.length });
@@ -460,8 +482,19 @@ export class ConnectServer {
     const q = optionalString(context.req.query("q"))?.toLowerCase() ?? "";
     const limit = Number(context.req.query("limit") ?? "20");
     const offset = Number(context.req.query("offset") ?? "0");
-    if (q.length > 256 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) {
-      return writeRuntimeFailure(context, { status: 400, errorCode: "invalid_input", message: "q, limit, or offset is invalid." });
+    if (
+      q.length > 256 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100 ||
+      !Number.isInteger(offset) ||
+      offset < 0
+    ) {
+      return writeRuntimeFailure(context, {
+        status: 400,
+        errorCode: "invalid_input",
+        message: "q, limit, or offset is invalid.",
+      });
     }
     const available = await this.priceableRuntimeActions(context);
     if (available instanceof Response) return available;
@@ -472,12 +505,20 @@ export class ConnectServer {
       if (actions) actions.push(action);
       else grouped.set(action.service, [action]);
     }
-    const items = [...grouped].flatMap(([service, actions]) => {
-      const displayName = providers.get(service)?.displayName ?? service;
-      const serviceMatched = !q || [service, displayName].join(" ").toLowerCase().includes(q);
-      const matches = serviceMatched ? actions : actions.filter((action) => [action.id, action.name, action.description].join(" ").toLowerCase().includes(q));
-      return matches.length ? [{ service, displayName, actionCount: matches.length, serviceMatched }] : [];
-    }).sort((left, right) => left.displayName.localeCompare(right.displayName) || left.service.localeCompare(right.service));
+    const items = [...grouped]
+      .flatMap(([service, actions]) => {
+        const displayName = providers.get(service)?.displayName ?? service;
+        const serviceMatched = !q || [service, displayName].join(" ").toLowerCase().includes(q);
+        const matches = serviceMatched
+          ? actions
+          : actions.filter((action) =>
+              [action.id, action.name, action.description].join(" ").toLowerCase().includes(q),
+            );
+        return matches.length ? [{ service, displayName, actionCount: matches.length, serviceMatched }] : [];
+      })
+      .sort(
+        (left, right) => left.displayName.localeCompare(right.displayName) || left.service.localeCompare(right.service),
+      );
     return writeRuntimeSuccess(context, { items: items.slice(offset, offset + limit), total: items.length });
   }
 
