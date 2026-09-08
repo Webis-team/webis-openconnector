@@ -1,3 +1,4 @@
+import type { GuardedFetchResolvedTransport } from "../core/guarded-fetch.ts";
 import type {
   ActionExecutor,
   ExecutionContext,
@@ -33,8 +34,17 @@ export interface ProviderFetchOptions {
    * derived from user/credential input. See {@link GuardedFetchOptions.skipDnsValidation}.
    */
   skipDnsValidation?: boolean;
+  /** Reject the first redirect response instead of issuing a request to its Location. */
+  rejectRedirects?: boolean;
   /** Additional credential-bearing headers to strip from cross-origin redirects. */
   additionalSensitiveHeaders?: readonly string[];
+}
+
+let providerResolvedTransport: GuardedFetchResolvedTransport | undefined;
+
+/** Configure the Node runtime transport without pulling Node-only dependencies into provider bundles. */
+export function setProviderResolvedTransport(transport: GuardedFetchResolvedTransport | undefined): void {
+  providerResolvedTransport = transport;
 }
 
 /**
@@ -44,10 +54,18 @@ export interface ProviderFetchOptions {
  * cannot redirect or resolve into loopback/link-local/metadata/private targets.
  */
 export function createProviderFetch(options: ProviderFetchOptions = {}): ProviderFetch {
+  const baseFetch = options.fetch;
+  const resolvedTransport =
+    baseFetch === undefined && !options.skipDnsValidation
+      ? (target: Parameters<GuardedFetchResolvedTransport>[0], input: RequestInfo | URL, init?: RequestInit) =>
+          providerResolvedTransport?.(target, input, init) ?? globalThis.fetch(input, init)
+      : undefined;
   return createGuardedFetch({
-    fetch: options.fetch,
+    fetch: baseFetch,
+    resolvedTransport,
     allowPrivateNetwork: options.allowPrivateNetwork,
     skipDnsValidation: options.skipDnsValidation,
+    maxRedirects: options.rejectRedirects ? 0 : undefined,
     additionalSensitiveHeaders: options.additionalSensitiveHeaders,
     mapTransportError: (error) =>
       error instanceof TypeError
@@ -186,6 +204,8 @@ export interface ProviderExecutorDefinition<TContext> {
   allowPrivateNetwork?: () => boolean;
   /** Skip the redundant DNS resolved-address check; only for hardcoded-host providers. */
   skipDnsValidation?: boolean;
+  /** Reject the first redirect response instead of issuing a second request. */
+  rejectRedirects?: boolean;
 }
 
 export interface BearerCredential {
@@ -294,6 +314,8 @@ export interface ProviderProxyDefinition {
   allowPrivateNetwork?: () => boolean;
   /** Skip the redundant DNS resolved-address check; only for hardcoded-base-URL proxies. */
   skipDnsValidation?: boolean;
+  /** Reject the first redirect response instead of issuing a second request. */
+  rejectRedirects?: boolean;
 }
 
 const blockedProxyRequestHeaders = new Set([
@@ -475,6 +497,7 @@ export function defineProviderProxy(input: ProviderProxyDefinition): ProviderPro
   const egressFetch = createProviderFetch({
     allowPrivateNetwork: input.allowPrivateNetwork,
     skipDnsValidation: input.skipDnsValidation,
+    rejectRedirects: input.rejectRedirects,
     additionalSensitiveHeaders,
   });
   return async (proxyInput: ProxyRequestInput, context: ExecutionContext): Promise<ProxyExecutionResult> => {
@@ -895,10 +918,11 @@ export function defineProviderExecutors<TContext>(input: ProviderExecutorDefinit
   const executors: ProviderExecutors = {};
   const fallbackMessage = input.fallbackMessage ?? "provider request failed";
   const egressFetch =
-    input.allowPrivateNetwork || input.skipDnsValidation
+    input.allowPrivateNetwork || input.skipDnsValidation || input.rejectRedirects
       ? createProviderFetch({
           allowPrivateNetwork: input.allowPrivateNetwork,
           skipDnsValidation: input.skipDnsValidation,
+          rejectRedirects: input.rejectRedirects,
         })
       : providerFetch;
   for (const [name, handler] of Object.entries(input.handlers)) {
