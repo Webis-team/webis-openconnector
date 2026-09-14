@@ -1,5 +1,6 @@
 export interface D1DatabaseBinding {
   prepare(query: string): D1PreparedStatementBinding;
+  batch?(statements: D1PreparedStatementBinding[]): Promise<Array<{ results: Record<string, unknown>[] }>>;
 }
 
 export interface D1PreparedStatementBinding {

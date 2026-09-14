@@ -15,6 +15,26 @@ const githubProfile = {
 };
 
 describe("D1RuntimeDatabase", () => {
+  it("uses one-time authorization generations and atomically disconnects", async () => {
+    const database = new D1RuntimeDatabase(new SqliteD1Database());
+    const store = database.connectionStore;
+    const generation = await store.beginAuthorization("github", "personal");
+    const credential = {
+      authType: "api_key" as const,
+      apiKey: "key",
+      values: {},
+      profile: githubProfile,
+      metadata: {},
+    };
+    expect(await store.completeAuthorization("github", "personal", "other", credential)).toBe(false);
+    expect(await store.completeAuthorization("github", "personal", generation, credential)).toBe(true);
+    expect(await store.completeAuthorization("github", "personal", generation, credential)).toBe(false);
+    const current = (await store.get("github", "personal"))!;
+    const pending = await store.beginAuthorization("github", "personal");
+    await store.revokeAuthorization("github", "personal");
+    expect(await store.completeAuthorization("github", "personal", pending, credential)).toBe(false);
+    expect(await store.updateCredential(current)).toBe(false);
+  });
   it("stores connections and OAuth client configs through the secret codec", async () => {
     const d1 = new SqliteD1Database();
     const database = new D1RuntimeDatabase(d1, {
@@ -516,6 +536,9 @@ class SqliteD1Database implements D1DatabaseBinding {
   private readonly database = new DatabaseSync(":memory:");
 
   constructor() {
+    this.database.exec(
+      readFileSync(new URL("../../../migrations/0012_user_oauth_generations.sql", import.meta.url), "utf8"),
+    );
     this.database.exec(readFileSync(new URL("../../../migrations/0001_runtime.sql", import.meta.url), "utf8"));
     this.database.exec(readFileSync(new URL("../../../migrations/0002_run_service.sql", import.meta.url), "utf8"));
     this.database.exec(
@@ -539,6 +562,19 @@ class SqliteD1Database implements D1DatabaseBinding {
     this.database.exec(
       readFileSync(new URL("../../../migrations/0011_runtime_token_connection_scope.sql", import.meta.url), "utf8"),
     );
+  }
+
+  async batch(statements: D1PreparedStatementBinding[]): Promise<Array<{ results: Record<string, unknown>[] }>> {
+    this.database.exec("begin immediate");
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.all());
+      this.database.exec("commit");
+      return results;
+    } catch (error) {
+      this.database.exec("rollback");
+      throw error;
+    }
   }
 
   prepare(query: string): D1PreparedStatementBinding {

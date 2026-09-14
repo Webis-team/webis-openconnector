@@ -522,6 +522,7 @@ function serializeConnection(connection: ConnectionSummary): Record<string, unkn
     authType: connection.authType,
     default: connection.default,
     profile: connection.profile,
+    authorizationRevision: connection.authorizationRevision,
   };
 }
 

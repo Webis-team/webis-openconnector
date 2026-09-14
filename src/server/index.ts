@@ -27,6 +27,7 @@ import { createProviderNetworkTransport } from "./provider-network-transport.ts"
 import { createSecretCodec } from "./secrets/secret-codec.ts";
 import { createNodeRuntimeDatabase } from "./storage/node-runtime-database.ts";
 import { DEFAULT_RUN_LIMIT } from "./storage/runtime-store.ts";
+import { addTestProviders } from "./users/test-provider.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const hostname = process.env.HOST ?? "127.0.0.1";
@@ -70,9 +71,10 @@ async function main(): Promise<void> {
 
   await mkdir(dataDir, { recursive: true });
   const staticRoot = await resolveStaticRoot(join(process.cwd(), "dist/web"));
-  const catalog = await loadCatalog(undefined, {
+  let catalog = await loadCatalog(undefined, {
     executableServices: Object.keys(executorModules),
   });
+  catalog = addTestProviders(catalog, executorModules, process.env);
   const runtimeDatabase = databaseUrl
     ? await createNodeRuntimeDatabase({
         backend: "postgresql",
@@ -98,6 +100,15 @@ async function main(): Promise<void> {
     await cleanupStagedTransitFiles(transitFileTempDir, transitFileTtlSeconds * 1000);
 
     const { app, runtimeAuthConfigured } = await createConnectApp({
+      managedUsers:
+        process.env.WEBIS_CONNECTOR_MANAGED_USERS === "1"
+          ? {
+              secret: process.env.WEBIS_CONNECTOR_USER_SECRET ?? "",
+              issuer: process.env.WEBIS_CONNECTOR_USER_ISSUER ?? "webis-gateway",
+              audience: process.env.WEBIS_CONNECTOR_USER_AUDIENCE ?? "webis-openconnector",
+              publicOrigin: process.env.WEBIS_PUBLIC_ORIGIN ?? publicOrigin,
+            }
+          : undefined,
       catalog,
       providerLoader: new ProviderLoader(executorModules),
       runtimeDatabase,

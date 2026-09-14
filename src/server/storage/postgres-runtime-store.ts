@@ -86,6 +86,7 @@ export class PostgresRuntimeDatabase implements RuntimeDatabase {
   async resetRuntimeData(): Promise<void> {
     await runInTransaction(this.pool, async (client) => {
       await client.query(`
+        delete from user_oauth_generations;
         delete from connections;
         delete from oauth_client_configs;
         delete from oauth_states;
@@ -170,6 +171,55 @@ class PostgresConnectionStore implements IConnectionStore {
   constructor(pool: Pool, secretCodec: ISecretCodec) {
     this.pool = pool;
     this.secretCodec = secretCodec;
+  }
+
+  async beginAuthorization(service: string, connectionName: string): Promise<string> {
+    const generation = crypto.randomUUID();
+    await runInTransaction(this.pool, async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`${service}:${connectionName}`]);
+      await client.query(
+        "insert into user_oauth_generations (service, connection_name, generation) values ($1,$2,$3) on conflict(service, connection_name) do update set generation = excluded.generation",
+        [service, connectionName, generation],
+      );
+    });
+    return generation;
+  }
+
+  async completeAuthorization(
+    service: string,
+    connectionName: string,
+    generation: string,
+    credential: ResolvedCredential,
+  ): Promise<boolean> {
+    const value = await this.secretCodec.encode(JSON.stringify(credential));
+    return runInTransaction(this.pool, async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`${service}:${connectionName}`]);
+      const current = await client.query(
+        "select generation from user_oauth_generations where service=$1 and connection_name=$2 for update",
+        [service, connectionName],
+      );
+      if (current.rows[0]?.generation !== generation) return false;
+      await client.query(
+        "insert into connections (id,revision,service,connection_name,value,updated_at) values ($1,$2,$3,$4,$5,$6) on conflict(service,connection_name) do update set revision=excluded.revision,value=excluded.value,updated_at=excluded.updated_at",
+        [crypto.randomUUID(), crypto.randomUUID(), service, connectionName, value, new Date().toISOString()],
+      );
+      await client.query("delete from user_oauth_generations where service=$1 and connection_name=$2", [
+        service,
+        connectionName,
+      ]);
+      return true;
+    });
+  }
+
+  async revokeAuthorization(service: string, connectionName: string): Promise<void> {
+    await runInTransaction(this.pool, async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`${service}:${connectionName}`]);
+      await client.query("delete from user_oauth_generations where service=$1 and connection_name=$2", [
+        service,
+        connectionName,
+      ]);
+      await client.query("delete from connections where service=$1 and connection_name=$2", [service, connectionName]);
+    });
   }
 
   async get(service: string, connectionName: string): Promise<StoredConnection | undefined> {

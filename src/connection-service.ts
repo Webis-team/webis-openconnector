@@ -24,6 +24,7 @@ const connectionNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
  * Connection summary returned to the local console.
  */
 export interface ConnectionSummary {
+  authorizationRevision?: string;
   id: string;
   service: string;
   connectionName: string;
@@ -53,6 +54,8 @@ export interface ConnectionServiceOptions {
   providerLoader: IProviderLoader;
   store: IConnectionStore;
   logger?: RuntimeLogger;
+  hidePlatformProfiles?: boolean;
+  recheckExecutionConnection?: boolean;
 }
 
 export interface StoredConnection {
@@ -83,6 +86,14 @@ export interface IConnectionStore {
   updateCredential(input: StoredConnection): Promise<boolean>;
   delete(service: string, connectionName: string): Promise<void>;
   list(): Promise<StoredConnection[]>;
+  beginAuthorization?(service: string, connectionName: string): Promise<string>;
+  completeAuthorization?(
+    service: string,
+    connectionName: string,
+    generation: string,
+    credential: ResolvedCredential,
+  ): Promise<boolean>;
+  revokeAuthorization?(service: string, connectionName: string): Promise<void>;
 }
 
 interface ServiceConnection {
@@ -126,6 +137,8 @@ export class ConnectionService {
   private readonly providerLoader: IProviderLoader;
   private readonly store: IConnectionStore;
   private readonly logger?: RuntimeLogger;
+  private readonly hidePlatformProfiles: boolean;
+  private readonly recheckExecutionConnection: boolean;
 
   constructor(input: ConnectionServiceOptions) {
     this.catalog = input.catalog;
@@ -133,6 +146,8 @@ export class ConnectionService {
     this.providerLoader = input.providerLoader;
     this.store = input.store;
     this.logger = input.logger;
+    this.hidePlatformProfiles = input.hidePlatformProfiles ?? false;
+    this.recheckExecutionConnection = input.recheckExecutionConnection ?? false;
   }
 
   async listConnections(): Promise<ConnectionSummary[]> {
@@ -232,8 +247,35 @@ export class ConnectionService {
 
     return {
       summary,
-      getCredential: async (requestedService) => (requestedService === service ? credential : undefined),
+      getCredential: async (requestedService) => {
+        if (requestedService !== service) return undefined;
+        if (this.recheckExecutionConnection && stored) {
+          const current = await this.store.get(service, name);
+          if (
+            !current ||
+            current.id !== stored.id ||
+            (current.credential.authType === "oauth2" &&
+              credential?.authType === "oauth2" &&
+              (current.credential.accessToken !== credential.accessToken ||
+                current.credential.metadata.webisAuthorizationGeneration !==
+                  credential.metadata.webisAuthorizationGeneration))
+          ) {
+            throw new ConnectionError("connection_not_found", "Connection changed before execution.");
+          }
+        }
+        return credential;
+      },
     };
+  }
+
+  async checkOAuthCredential(service: string): Promise<boolean> {
+    const credential = await this.getCredential(service);
+    if (credential?.authType !== "oauth2")
+      throw new ConnectionError("connection_not_found", "Personal connection is unavailable.");
+    const validators = await this.providerLoader.loadCredentialValidators(service);
+    if (!validators?.oauth2) return false;
+    await validators.oauth2(credential, this.createValidatorOptions());
+    return true;
   }
 
   async getCredential(service: string, connectionName?: string): Promise<ResolvedCredential | undefined> {
@@ -405,7 +447,14 @@ export class ConnectionService {
       configured: true,
       virtual: false,
       default: connectionName === defaultConnectionName,
-      profile: credential.profile,
+      authorizationRevision:
+        credential.authType === "oauth2" && typeof credential.metadata.webisAuthorizationGeneration === "string"
+          ? credential.metadata.webisAuthorizationGeneration
+          : undefined,
+      profile:
+        this.hidePlatformProfiles && credential.authType !== "oauth2"
+          ? { accountId: `${provider.service}:platform`, displayName: "Platform", grantedScopes: [] }
+          : credential.profile,
     };
   }
 
@@ -628,7 +677,10 @@ export class ConnectionService {
   ): CredentialRuntimeData {
     return {
       profile: this.createCredentialProfile(provider, authType, [], {}, validation, {
-        profile: credential.profile,
+        profile:
+          this.hidePlatformProfiles && credential.authType !== "oauth2"
+            ? { accountId: `${provider.service}:platform`, displayName: "Platform", grantedScopes: [] }
+            : credential.profile,
         metadata: credential.metadata,
       }),
       metadata: {
