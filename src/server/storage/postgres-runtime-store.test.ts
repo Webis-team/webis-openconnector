@@ -44,7 +44,11 @@ describe("PostgreSQL migrations with PGlite", () => {
       await expect(assertPostgresSchemaReady(pool)).resolves.toBeUndefined();
       await expect(migratePostgresDatabase({ pool })).resolves.toBeUndefined();
       await expect(pool.query("select name from runtime_migrations order by name")).resolves.toMatchObject({
-        rows: [{ name: "0010_runtime.sql" }, { name: "0011_runtime_token_connection_scope.sql" }],
+        rows: [
+          { name: "0010_runtime.sql" },
+          { name: "0011_runtime_token_connection_scope.sql" },
+          { name: "0012_user_oauth_generations.sql" },
+        ],
       });
 
       await pool.query("delete from runtime_migrations where name = $1", ["0010_runtime.sql"]);
@@ -90,6 +94,20 @@ describe("PostgresRuntimeDatabase with PGlite", () => {
   afterAll(async () => {
     await testServer.server.stop();
     await testServer.database.close();
+  });
+
+  it("commits only the latest personal authorization and cannot restore a disconnected credential", async () => {
+    const store = database.connectionStore;
+    const first = await store.beginAuthorization!("github", "personal");
+    const latest = await store.beginAuthorization!("github", "personal");
+    expect(await store.completeAuthorization!("github", "personal", first, githubCredential("old"))).toBe(false);
+    expect(await store.completeAuthorization!("github", "personal", latest, githubCredential("new"))).toBe(true);
+    const connection = (await store.get("github", "personal"))!;
+    const pending = await store.beginAuthorization!("github", "personal");
+    await store.revokeAuthorization!("github", "personal");
+    expect(await store.completeAuthorization!("github", "personal", pending, githubCredential("late"))).toBe(false);
+    expect(await store.updateCredential(connection)).toBe(false);
+    expect(await store.get("github", "personal")).toBeUndefined();
   });
 
   it("persists connections and OAuth data across database instances", async () => {

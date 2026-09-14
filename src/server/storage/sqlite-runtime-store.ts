@@ -115,7 +115,8 @@ export class SqliteRuntimeDatabase implements RuntimeDatabase {
 
   resetRuntimeData(): void {
     this.database.exec(`
-      delete from connections;
+      delete from user_oauth_generations;
+        delete from connections;
       delete from oauth_client_configs;
       delete from oauth_states;
       delete from runtime_tokens;
@@ -138,6 +139,64 @@ export class SqliteConnectionStore implements IConnectionStore {
   constructor(database: DatabaseSync, secretCodec: ISecretCodec) {
     this.database = database;
     this.secretCodec = secretCodec;
+  }
+
+  async beginAuthorization(service: string, connectionName: string): Promise<string> {
+    const generation = crypto.randomUUID();
+    this.database
+      .prepare(
+        "insert into user_oauth_generations (service, connection_name, generation) values (?,?,?) on conflict(service, connection_name) do update set generation = excluded.generation",
+      )
+      .run(service, connectionName, generation);
+    return generation;
+  }
+
+  async completeAuthorization(
+    service: string,
+    connectionName: string,
+    generation: string,
+    credential: ResolvedCredential,
+  ): Promise<boolean> {
+    const value = await this.secretCodec.encode(JSON.stringify(credential));
+    this.database.exec("begin immediate");
+    try {
+      const current = this.database
+        .prepare("select generation from user_oauth_generations where service=? and connection_name=?")
+        .get(service, connectionName);
+      if (current?.generation !== generation) {
+        this.database.exec("rollback");
+        return false;
+      }
+      this.database
+        .prepare(
+          "insert into connections (id,revision,service,connection_name,value,updated_at) values (?,?,?,?,?,?) on conflict(service,connection_name) do update set revision=excluded.revision,value=excluded.value,updated_at=excluded.updated_at",
+        )
+        .run(crypto.randomUUID(), crypto.randomUUID(), service, connectionName, value, new Date().toISOString());
+      this.database
+        .prepare("delete from user_oauth_generations where service=? and connection_name=?")
+        .run(service, connectionName);
+      this.database.exec("commit");
+      return true;
+    } catch (error) {
+      this.database.exec("rollback");
+      throw error;
+    }
+  }
+
+  async revokeAuthorization(service: string, connectionName: string): Promise<void> {
+    this.database.exec("begin immediate");
+    try {
+      this.database
+        .prepare("delete from user_oauth_generations where service=? and connection_name=?")
+        .run(service, connectionName);
+      this.database
+        .prepare("delete from connections where service=? and connection_name=?")
+        .run(service, connectionName);
+      this.database.exec("commit");
+    } catch (error) {
+      this.database.exec("rollback");
+      throw error;
+    }
   }
 
   async get(service: string, connectionName: string): Promise<StoredConnection | undefined> {

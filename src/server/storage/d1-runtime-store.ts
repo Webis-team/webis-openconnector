@@ -58,6 +58,60 @@ export class D1ConnectionStore implements IConnectionStore {
     this.secretCodec = secretCodec;
   }
 
+  async beginAuthorization(service: string, connectionName: string): Promise<string> {
+    const generation = crypto.randomUUID();
+    await this.database
+      .prepare(
+        "insert into user_oauth_generations (service, connection_name, generation) values (?,?,?) on conflict(service, connection_name) do update set generation = excluded.generation",
+      )
+      .bind(service, connectionName, generation)
+      .run();
+    return generation;
+  }
+
+  async completeAuthorization(
+    service: string,
+    connectionName: string,
+    generation: string,
+    credential: ResolvedCredential,
+  ): Promise<boolean> {
+    const value = await this.secretCodec.encode(JSON.stringify(credential));
+    if (!this.database.batch) throw new Error("Atomic D1 batch is required for user authorization.");
+    const result = await this.database.batch([
+      this.database
+        .prepare(
+          "insert into connections (id,revision,service,connection_name,value,updated_at) select ?,?,?,?,?,? where exists(select 1 from user_oauth_generations where service=? and connection_name=? and generation=?) on conflict(service,connection_name) do update set revision=excluded.revision,value=excluded.value,updated_at=excluded.updated_at returning id",
+        )
+        .bind(
+          crypto.randomUUID(),
+          crypto.randomUUID(),
+          service,
+          connectionName,
+          value,
+          new Date().toISOString(),
+          service,
+          connectionName,
+          generation,
+        ),
+      this.database
+        .prepare("delete from user_oauth_generations where service=? and connection_name=? and generation=?")
+        .bind(service, connectionName, generation),
+    ]);
+    return (result[0]?.results?.length ?? 0) > 0;
+  }
+
+  async revokeAuthorization(service: string, connectionName: string): Promise<void> {
+    if (!this.database.batch) throw new Error("Atomic D1 batch is required for user authorization.");
+    await this.database.batch([
+      this.database
+        .prepare("delete from user_oauth_generations where service=? and connection_name=?")
+        .bind(service, connectionName),
+      this.database
+        .prepare("delete from connections where service=? and connection_name=?")
+        .bind(service, connectionName),
+    ]);
+  }
+
   async get(service: string, connectionName: string): Promise<StoredConnection | undefined> {
     const row = await this.database
       .prepare("select id, revision, value from connections where service = ? and connection_name = ?")

@@ -6,6 +6,7 @@ import type { ITransitFileService, TransitFileUpload } from "./files/transit-fil
 import type { Logger } from "./logger.ts";
 import type { ISecretCodec } from "./secrets/secret-codec-core.ts";
 import type { RuntimeDatabase } from "./storage/runtime-database.ts";
+import type { ManagedUserConfig } from "./users/managed-app.ts";
 import type { Hono } from "hono";
 
 import { ConnectionService } from "../connection-service.ts";
@@ -15,8 +16,10 @@ import { OAuthFlowService } from "../oauth/oauth-flow-service.ts";
 import { ActionRunner } from "./actions/action-runner.ts";
 import { ConnectServer } from "./connect-server.ts";
 import { RuntimeTokenService } from "./storage/runtime-token-service.ts";
+import { createManagedApp } from "./users/managed-app.ts";
 
 export interface ConnectAppOptions {
+  managedUsers?: ManagedUserConfig;
   catalog: CatalogStore;
   providerLoader: IProviderLoader;
   runtimeDatabase: RuntimeDatabase;
@@ -69,37 +72,39 @@ export async function createConnectApp(options: ConnectAppOptions): Promise<Conn
     logger: options.logger,
   });
 
-  return {
-    app: new ConnectServer({
-      catalog: options.catalog,
-      providerLoader: options.providerLoader,
+  const adminApp = new ConnectServer({
+    managedPricingCatalog: Boolean(options.managedUsers),
+    catalog: options.catalog,
+    providerLoader: options.providerLoader,
+    connections,
+    oauthClientConfigs,
+    oauthFlow: new OAuthFlowService({
+      clientConfigs: oauthClientConfigs,
       connections,
-      oauthClientConfigs,
-      oauthFlow: new OAuthFlowService({
-        clientConfigs: oauthClientConfigs,
-        connections,
-        states: options.runtimeDatabase.oauthStateStore,
-        secretCodec: options.secretCodec,
-        isCustomClientConfigAllowed,
-      }),
-      actions,
-      idempotency: options.runtimeDatabase.idempotencyStore,
-      transitFiles: options.transitFiles,
-      uploadTransitFile: options.uploadTransitFile,
-      runtimeTokens,
-      runtimePolicyStore: options.runtimeDatabase.runtimePolicyStore,
-      registerStaticRoutes: options.registerStaticRoutes,
-      auth: {
-        adminToken: options.adminToken,
-        runtimeToken: options.runtimeToken,
-        hasRuntimeTokens: hasStoredRuntimeTokens,
-        resolveRuntimeToken: (token) => runtimeTokens.resolveToken(token),
-        verifyRuntimeJwt: options.verifyRuntimeJwt,
-      },
-      actionPolicy: options.actionPolicy,
-      logger: options.logger,
-      compressApiResponses: options.compressApiResponses,
-    }).createApp(),
+      states: options.runtimeDatabase.oauthStateStore,
+      secretCodec: options.secretCodec,
+      isCustomClientConfigAllowed,
+    }),
+    actions,
+    idempotency: options.runtimeDatabase.idempotencyStore,
+    transitFiles: options.transitFiles,
+    uploadTransitFile: options.uploadTransitFile,
+    runtimeTokens,
+    runtimePolicyStore: options.runtimeDatabase.runtimePolicyStore,
+    registerStaticRoutes: options.registerStaticRoutes,
+    auth: {
+      adminToken: options.adminToken,
+      runtimeToken: options.runtimeToken,
+      hasRuntimeTokens: hasStoredRuntimeTokens,
+      resolveRuntimeToken: (token) => runtimeTokens.resolveToken(token),
+      verifyRuntimeJwt: options.verifyRuntimeJwt,
+    },
+    actionPolicy: options.actionPolicy,
+    logger: options.logger,
+    compressApiResponses: options.compressApiResponses,
+  }).createApp();
+  return {
+    app: options.managedUsers ? createManagedApp(options, options.managedUsers, adminApp) : adminApp,
     runtimeAuthConfigured:
       Boolean(options.runtimeToken) ||
       Boolean(options.verifyRuntimeJwt) ||

@@ -24,6 +24,7 @@ export interface OAuthAuthorizationStartInput {
 }
 
 export interface OAuthAuthorizationCompleteInput {
+  service?: string;
   state: string;
   code: string;
   signal?: AbortSignal;
@@ -91,16 +92,10 @@ export class OAuthFlowService {
 
     const state = crypto.randomUUID();
     const pkceCodeVerifier = auth.pkce ? createPkceCodeVerifier() : undefined;
-    await this.states.set({
-      service,
-      connectionName,
-      state,
-      createdAt: new Date().toISOString(),
-      pkceCodeVerifier,
-      clientConfig: input.clientConfig ? config : undefined,
-    });
 
     const authorizationUrl = new URL(this.clientConfigs.resolveEndpointUrl(service, auth.authorizationUrl, config));
+    this.clientConfigs.resolveEndpointUrl(service, auth.tokenUrl, config);
+    if (auth.refreshTokenUrl) this.clientConfigs.resolveEndpointUrl(service, auth.refreshTokenUrl, config);
     for (const [key, value] of Object.entries(auth.authorizationParams ?? {})) {
       authorizationUrl.searchParams.set(key, value);
     }
@@ -125,6 +120,15 @@ export class OAuthFlowService {
       authorizationUrl.searchParams.set("code_challenge_method", auth.pkce?.method ?? "S256");
     }
 
+    await this.states.set({
+      service,
+      connectionName,
+      state,
+      createdAt: new Date().toISOString(),
+      pkceCodeVerifier,
+      clientConfig: input.clientConfig ? config : undefined,
+    });
+
     return {
       authorizationUrl: authorizationUrl.toString(),
       state,
@@ -136,7 +140,7 @@ export class OAuthFlowService {
     if (!pending) {
       throw new OAuthFlowError("invalid_oauth_state", "OAuth state is missing or expired.");
     }
-    if (isExpiredOAuthState(pending, this.stateMaxAgeMs)) {
+    if ((input.service && pending.service !== input.service) || isExpiredOAuthState(pending, this.stateMaxAgeMs)) {
       throw new OAuthFlowError("invalid_oauth_state", "OAuth state is missing or expired.");
     }
 

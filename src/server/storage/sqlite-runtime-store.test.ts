@@ -50,6 +50,7 @@ describe("SqliteRuntimeDatabase", () => {
       "0009_runtime_token_proxy.sql",
       "0010_connection_revision.sql",
       "0011_runtime_token_connection_scope.sql",
+      "0012_user_oauth_generations.sql",
     ];
     expect(entries.filter((entry) => entry.message === "sqlite migration started")).toEqual(
       migrations.map((migration) => ({ fields: { migration }, message: "sqlite migration started" })),

@@ -45,6 +45,7 @@ export interface OAuthClientConfigSummary {
 export interface OAuthClientConfigServiceOptions {
   catalog: CatalogStore;
   origin: string;
+  callbackPath?: (service: string) => string;
   store: IOAuthClientConfigStore;
   isCustomClientConfigAvailable?: (service: string) => boolean;
 }
@@ -70,12 +71,14 @@ export class OAuthClientConfigService {
 
   private readonly catalog: CatalogStore;
   private readonly origin: string;
+  private readonly callbackPath: (service: string) => string;
   private readonly store: IOAuthClientConfigStore;
   private readonly isCustomClientConfigAvailable: (service: string) => boolean;
 
   constructor(input: OAuthClientConfigServiceOptions) {
     this.catalog = input.catalog;
     this.origin = input.origin.replace(/\/$/, "");
+    this.callbackPath = input.callbackPath ?? (() => OAuthClientConfigService.callbackPath);
     this.store = input.store;
     this.isCustomClientConfigAvailable = input.isCustomClientConfigAvailable ?? (() => false);
   }
@@ -141,7 +144,7 @@ export class OAuthClientConfigService {
 
   expectedRedirectUri(service: string): string {
     this.getOAuthDefinition(service);
-    return `${this.origin}${OAuthClientConfigService.callbackPath}`;
+    return `${this.origin}${this.callbackPath(service)}`;
   }
 
   resolveEndpointUrl(service: string, endpointUrl: string, config: OAuthClientConfig): string {
